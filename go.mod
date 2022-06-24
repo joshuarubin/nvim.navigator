@@ -1,5 +1,5 @@
-module github.com/aca/wezterm.nvim
+module github.com/joshuarubin/nvim.navigator
 
-go 1.17
+go 1.18
 
-require github.com/neovim/go-client v1.2.0 // indirect
+require github.com/neovim/go-client v1.2.1
