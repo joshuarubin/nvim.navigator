@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/neovim/go-client/nvim"
 )
@@ -12,7 +14,8 @@ import (
 func main() {
 	var app App
 
-	switch err := app.Run(); err {
+	ctx := context.Background()
+	switch err := app.Run(ctx); err {
 	case errSameWindow:
 		os.Exit(1)
 	case nil:
@@ -25,31 +28,39 @@ func main() {
 var errSameWindow = fmt.Errorf("same window")
 
 type App struct {
-	Dir    string
-	Addr   string
-	Action string
+	Dir     string
+	Addr    string
+	Action  string
+	Timeout time.Duration
 }
 
-func (a *App) Init() error {
+func (a *App) Init(ctx context.Context) (context.Context, context.CancelFunc, error) {
+	cancel := func() {}
+
 	flags := flag.NewFlagSet("nvim-wezterm", flag.ContinueOnError)
 
 	flags.StringVar(&a.Dir, "dir", "", "h, j, k, or l: direction to move in neovim")
 	flags.StringVar(&a.Addr, "addr", "", "address neovim is listening on")
 	flags.StringVar(&a.Action, "action", "", "move or resize")
+	flags.DurationVar(&a.Timeout, "timeout", 25*time.Millisecond, "timeout for connection")
 
 	if err := flags.Parse(os.Args[1:]); err != nil {
 		flags.Usage()
-		return err
+		return ctx, cancel, err
+	}
+
+	if a.Timeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, a.Timeout)
 	}
 
 	if a.Addr == "" {
 		flags.Usage()
-		return fmt.Errorf("missing -addr")
+		return ctx, cancel, fmt.Errorf("missing -addr")
 	}
 
 	if _, err := os.Stat(a.Addr); err != nil {
 		flags.Usage()
-		return err
+		return ctx, cancel, err
 	}
 
 	a.Dir = strings.ToLower(a.Dir)
@@ -60,36 +71,50 @@ func (a *App) Init() error {
 		case "h", "j", "k", "l":
 		default:
 			flags.Usage()
-			return fmt.Errorf("invalid -dir: %q", a.Dir)
+			return ctx, cancel, fmt.Errorf("invalid -dir: %q", a.Dir)
 		}
 	default:
 		flags.Usage()
-		return fmt.Errorf("invalid -action: %q", a.Action)
+		return ctx, cancel, fmt.Errorf("invalid -action: %q", a.Action)
 	}
 
-	return nil
+	return ctx, cancel, nil
 }
 
-func (a *App) Run() error {
-	if err := a.Init(); err != nil {
+func (a *App) Run(ctx context.Context) error {
+	ctx, cancel, err := a.Init(ctx)
+	if err != nil {
 		return err
 	}
+	defer cancel()
 
-	c, err := nvim.Dial(a.Addr)
+	opt := nvim.DialContext(ctx)
+	c, err := nvim.Dial(a.Addr, opt)
 	if err != nil {
 		return err
 	}
 
 	defer c.Close()
 
-	switch a.Action {
-	case "move":
-		return a.Move(c)
-	case "resize":
-		return a.Resize(c)
-	}
+	done := make(chan struct{})
 
-	return nil
+	go func() {
+		defer close(done)
+
+		switch a.Action {
+		case "move":
+			err = a.Move(c)
+		case "resize":
+			err = a.Resize(c)
+		}
+	}()
+
+	select {
+	case <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (a *App) Move(c *nvim.Nvim) error {
